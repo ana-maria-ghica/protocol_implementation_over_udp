@@ -9,6 +9,7 @@
 #include <cassert>
 #include <stdlib.h>
 #include "lib.h"
+#include "protocol.h"
 
 #define CHUNKSIZE 1024
 
@@ -32,7 +33,7 @@ int main(int argc, char *argv[])
     init_sender(8, 2);
 
     /* Connect to the server */
-    struct in_addr addr;
+    struct in_addr addr;  // adresa clientului
     inet_aton("172.16.0.100", &addr);
     int conn_id = setup_connection(addr.s_addr, htons(8032));
     printf("Connected to server\n");

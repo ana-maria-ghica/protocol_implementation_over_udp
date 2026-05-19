@@ -27,6 +27,8 @@ struct connection {
                            have many more packets in our window */
 
     /* TODO. Parameters used only by the client */
+    struct list* window;
+    int next_seq;
 };
 
 /* ########## API that we expose to the application ########### */
@@ -35,14 +37,19 @@ struct connection {
  * client. Returns a connection id. Blocking untill it receives a connection
  * request */
 int wait4connect(uint32_t ip, uint16_t port);
+
 /* Equivalent of connect. Used by the client to connect to a server. */
 int setup_connection(uint32_t ip, uint16_t port);
+
 /* Equivalent to recv. Blocking if there is no data to be written in buffer */
 int recv_data(int connectionid, char *buffer, int len);
+
 /* Equivalent to send. Used by the client to send a stream of bytes as segments */
 int send_data(int conn_id, char *buffer, int len);
+
 /* Used to initialize your protocol on the receiver side. */
 void init_receiver(int recv_buffer_bytes);
+
 /* Used to initialize your protocol on the sender side */
 void init_sender(int speed, int delay);
 
