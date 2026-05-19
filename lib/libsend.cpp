@@ -125,7 +125,7 @@ int send_data(int conn_id, char *buffer, int len)
     list* current_list = current_connection->window;
     
     // verific intai daca mai am loc sa pun in lista
-    if (current_list->size >= current_connection->max_window_seq) {
+    if (current_list->size >= current_connection->max_window_seq) {   // ------------------------------------------!!!!! atentie max_window_seq nu reprezinta ceea ce credeam, trebuie sa compar cu alt camp
         pthread_mutex_unlock(&cons[conn_id]->con_lock);
         return -1;
     }
@@ -228,7 +228,7 @@ void *sender_handler(void *arg)
             window->head = head;
             window->size -= deleted_nodes;
 
-            
+
             // implementarea de aici ar corespunde pentru [send_new_segments] --------------------------------------------------------
             // trimit pachetele (max_window_size sau cate exista in lista, daca sunt mai putine)
             int current_size = get_in_flight_nodes(window, window->head, window->next_to_send);

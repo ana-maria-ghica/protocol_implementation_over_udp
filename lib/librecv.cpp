@@ -8,6 +8,10 @@
 #include <poll.h>
 #include <cassert>
 #include <sys/timerfd.h>
+#include <cerrno>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
 
 using namespace std;
 
@@ -17,6 +21,9 @@ struct pollfd data_fds[MAX_CONNECTIONS];
 /* Used for timers per connection */
 struct pollfd timer_fds[MAX_CONNECTIONS];
 int fdmax = 0;
+
+// variabilele globale
+int recv_buffer_dim, conn_cnt;
 
 int recv_data(int conn_id, char *buffer, int len)
 {
@@ -63,7 +70,8 @@ int wait4connect(uint32_t ip, uint16_t port)
      * until a connection is established. */
 
     struct connection *con = (struct connection *)malloc(sizeof(struct connection));
-    int conn_id = 0;
+    int conn_id = conn_cnt;
+    conn_cnt++;
 
     /* This can be used to set a timer on a socket, useful once we received a
      * SYN. You may want to disable by setting the time to 0 (tv_sec = 0,
@@ -78,6 +86,54 @@ int wait4connect(uint32_t ip, uint16_t port)
     /* Receive SYN on the connection socket. Create a new socket and bind it to
      * the chosen port. Send the data port number via SYN-ACK to the client */
     con->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    struct sockaddr_in connection_addr;
+    memset(&connection_addr, 0, sizeof(struct sockaddr_in));
+    connection_addr.sin_family = AF_INET;
+    connection_addr.sin_port = 0;  // ca sa creez socket nou pe un port aleator
+    connection_addr.sin_addr.s_addr = ip;
+
+    int rc;
+    rc = bind(con->sockfd, (struct sockaddr*)&connection_addr, sizeof(struct sockaddr_in));
+    if (rc < 0) {
+        perror("bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // three way handshake -----------------------------------------------------------
+    // 1. primesc SYN de la client
+    char syn_buffer[MAX_SEGMENT_SIZE];
+    socklen_t connection_addr_len = sizeof(connection_addr);
+    rc = recvfrom(con->sockfd, syn_buffer, MAX_SEGMENT_SIZE, 0, (struct sockaddr*)&connection_addr, &connection_addr_len);
+    if (rc < 0) {
+        perror("recv failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // din bufferul primit preiau header-ul
+    struct poli_tcp_ctrl_hdr syn = *(struct poli_tcp_ctrl_hdr*)syn_buffer;
+    if (syn.type != SYN_TYPE) {
+        return -1;
+    }
+    
+    // 2. construiesc SYN_ACK si trimit la client
+    int syn_ack_buffer_len = sizeof(struct poli_tcp_ctrl_hdr) + sizeof(uint16_t);
+    char syn_ack_buffer[syn_ack_buffer_len];
+
+    struct poli_tcp_ctrl_hdr syn_ack;
+    memset(&syn_ack, 0, sizeof(struct poli_tcp_ctrl_hdr));
+    syn_ack.protocol_id = POLI_PROTOCOL_ID;
+    syn_ack.conn_id = con->conn_id;
+    syn_ack.type = SYN_WITH_ACK_TYPE;
+    syn_ack.ack_num = syn.seq_num + 1;
+    syn_ack.recv_window = recv_buffer_dim;
+    syn_ack.seq_num = 0;
+    memcpy(syn_ack_buffer, &syn_ack, sizeof(struct poli_tcp_ctrl_hdr));
+
+    // trebuie sa pun in buffer NOUL port pe care deschid conexiunea
+    // noul port e determinat de getsockname()
+    // strcat(syn_ack_buffer, )
+
 
     /* Since we can have multiple connection, we want to know if data is available
        on the socket used by a given connection. We use POLL for this */
@@ -110,6 +166,27 @@ void init_receiver(int recv_buffer_bytes)
     int ret;
 
     /* TODO: Create the connection socket and bind it to 8031 */
+    int listenfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (listenfd < 0) {
+        perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(struct sockaddr_in));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(8032);
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+
+    int rc;
+    rc = bind(listenfd, (struct sockaddr*)&serv_addr, sizeof(struct sockaddr_in));
+    if (rc < 0) {
+        perror("bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // setez variabila recv_buffer_bytes
+    recv_buffer_dim = recv_buffer_bytes;
 
     ret = pthread_create( &thread1, NULL, receiver_handler, NULL);
     assert(ret == 0);
