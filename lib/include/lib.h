@@ -26,6 +26,8 @@ struct connection {
     int max_window_seq; /* Used to store the max number of packets that can be inflight, since we can
                            have many more packets in our window */
 
+    struct list* recv_list;
+
     /* TODO. Parameters used only by the client */
     struct list* window;
     int next_seq;
