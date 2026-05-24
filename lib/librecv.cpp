@@ -24,7 +24,7 @@ struct pollfd timer_fds[MAX_CONNECTIONS];
 int fdmax = 0;
 
 // variabilele globale
-int recv_buffer_dim, conn_cnt, listen_fd;
+int recv_buffer_dim, conn_cnt, listenfd;
 
 // nod in lista ----------------------------------------------
 struct list_node {
@@ -83,6 +83,7 @@ int recv_data(int conn_id, char *buffer, int len)
 
         // dealoc nodul
         free(to_free);
+        current_list->size--;
     }
 
     // actualizez head-ul
@@ -113,8 +114,7 @@ void *receiver_handler(void *arg)
         as to not have synchronization issues with the recv_data calls which are
         on the main thread */
 
-        // primesc un segment -> verific  if (res != -1 && ((poli_tcp_data_hdr *) segment)->type == DATA) {
-
+        
 
 
         pthread_mutex_unlock(&cons[conn_id]->con_lock);
@@ -131,21 +131,24 @@ int wait4connect(uint32_t ip, uint16_t port)
     struct connection *con = (struct connection *)malloc(sizeof(struct connection));
     con->conn_id = conn_cnt;
     conn_cnt++;
+    con->recv_list = create_window();
+    con->expected_seq = 0;  
+
+    con->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
 
     /* This can be used to set a timer on a socket, useful once we received a
      * SYN. You may want to disable by setting the time to 0 (tv_sec = 0,
-     * tv_usec = 0)
+     * tv_usec = 0) */
     struct timeval tv;
     tv.tv_sec = 2;
     tv.tv_usec = 100000;
     if (setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv)) < 0) {
         perror("Error");
-    } */
+    }
 
     /* Receive SYN on the connection socket. Create a new socket and bind it to
      * the chosen port. Send the data port number via SYN-ACK to the client */
-    con->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-
+    
     // adresa clientului care se va conecta la server
     struct sockaddr_in client_addr;
     memset(&client_addr, 0, sizeof(struct sockaddr_in));
@@ -160,7 +163,7 @@ int wait4connect(uint32_t ip, uint16_t port)
     struct poli_tcp_ctrl_hdr syn;
     int rc;
     while(1) {
-        rc = recvfrom(listen_fd, syn_buffer, MAX_SEGMENT_SIZE, 0, (struct sockaddr*)&client_addr, &client_addr_len);
+        rc = recvfrom(listenfd, syn_buffer, MAX_SEGMENT_SIZE, 0, (struct sockaddr*)&client_addr, &client_addr_len);
         if (rc < 0) {
             perror("recv failed");
             exit(EXIT_FAILURE);
@@ -174,6 +177,7 @@ int wait4connect(uint32_t ip, uint16_t port)
             break;
         }
     }
+    con->servaddr = client_addr;
 
     // conectez serverul la retea pe acest socket - si initial portul e 0
     struct sockaddr_in connection_addr;
@@ -190,7 +194,6 @@ int wait4connect(uint32_t ip, uint16_t port)
     // vreau sa determin portul pe care s-a format conexiunea
     getsockname(con->sockfd, (struct sockaddr*)&connection_addr, &connection_addr_len);
     uint16_t new_connection_port = connection_addr.sin_port;
-
     
     // 2. construiesc SYN_ACK si trimit la client -----------------------------------------------------------
     int syn_ack_buffer_len = sizeof(struct poli_tcp_ctrl_hdr) + sizeof(uint16_t);
@@ -209,7 +212,7 @@ int wait4connect(uint32_t ip, uint16_t port)
     // trebuie sa pun in buffer NOUL port pe care deschid conexiunea
     memcpy(syn_ack_buffer + sizeof(struct poli_tcp_ctrl_hdr), &new_connection_port, sizeof(uint16_t));
 
-    rc = sendto(con->sockfd, syn_ack_buffer, syn_ack_buffer_len, 0, (struct sockaddr*)&client_addr, client_addr_len);
+    rc = sendto(listenfd, syn_ack_buffer, syn_ack_buffer_len, 0, (struct sockaddr*)&client_addr, client_addr_len);
     if (rc < 0) {
         perror("recv failed");
         exit(EXIT_FAILURE);
@@ -223,7 +226,7 @@ int wait4connect(uint32_t ip, uint16_t port)
             // ori am timeout
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // la timeout - trmit iar syn_ack
-                rc = sendto(con->sockfd, syn_ack_buffer, syn_ack_buffer_len, 0, (struct sockaddr*)&client_addr, client_addr_len);
+                rc = sendto(listenfd, syn_ack_buffer, syn_ack_buffer_len, 0, (struct sockaddr*)&client_addr, client_addr_len);
             } else {
                 // eroare la recvfrom
                 perror("recv failed");
@@ -264,7 +267,7 @@ int wait4connect(uint32_t ip, uint16_t port)
 
     DEBUG_PRINT("Connection established!");
 
-    return 0;
+    return con->conn_id;
 }
 
 void init_receiver(int recv_buffer_bytes)
@@ -273,7 +276,7 @@ void init_receiver(int recv_buffer_bytes)
     int ret;
 
     /* TODO: Create the connection socket and bind it to 8031 */
-    int listenfd = socket(AF_INET, SOCK_DGRAM, 0);
+    listenfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (listenfd < 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);

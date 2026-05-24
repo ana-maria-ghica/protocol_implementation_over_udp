@@ -22,15 +22,19 @@ struct connection {
     struct sockaddr_in servaddr; /* used to identify the destination */
     pthread_mutex_t con_lock; /* Used for syncronization with the handler thread and read/send calls.*/
 
-    /* TODO. Parameters used only by the sender */
-    int max_window_seq; /* Used to store the max number of packets that can be inflight, since we can
-                           have many more packets in our window */
-
-    struct list* recv_list;
-
-    /* TODO. Parameters used only by the client */
+    
+    // parametrii folositi de sender - libsend.cpp
+    int max_window_seq; /* max number of packets that can be inflight, since we can have many more packets in our window */
+    int next_seq; // urmatorul seq_num de atribuit
+    int base; // primul seq_num neconfirmat
+    int recv_window; // ultimul recv_window primit de la server
     struct list* window;
-    int next_seq;
+
+    
+    // parametrii folositi de receiver - librecv.cpp    
+    int expected_seq; // urmatorul seq_num asteptat in ordine
+    int recv_buffer_dim; // spatiul total al buffer-ului
+    struct list* recv_list;
 };
 
 /* ########## API that we expose to the application ########### */

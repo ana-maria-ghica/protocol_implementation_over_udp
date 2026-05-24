@@ -19,6 +19,7 @@ using namespace std;
 std::map<int, struct connection *> cons;
 
 #define MAX_CHUNK_SIZE 1024
+#define SEND_BUFFER_MAX 1024
 
 struct pollfd data_fds[MAX_CONNECTIONS];
 /* Used for timers per connection */
@@ -26,13 +27,15 @@ struct pollfd timer_fds[MAX_CONNECTIONS];
 int fdmax = 0;
 
 // variabile globale
-int bdp, conn_cnt, rc;
+int bdp, conn_cnt;
 
 // nod in lista ----------------------------------------------
 struct list_node {
     char payload[MAX_DATA_SIZE];
     int payload_len;
     int seq_num;
+    bool sent;
+    bool acked;
     list_node* next;
 };
 
@@ -70,6 +73,8 @@ void add_element(struct list* window, char *buffer, int len) {
         memcpy(head->payload, buffer, len);
         head->payload_len = len;
         head->seq_num = 0; // setez valoarea lui in sender_handler() cand trimit pachetul
+        head->sent = false;
+        head->acked = false;
         head->next = NULL;
 
         // actualizez window
@@ -92,6 +97,8 @@ void add_element(struct list* window, char *buffer, int len) {
         memcpy(new_node->payload, buffer, len);
         new_node->payload_len = len;
         new_node->seq_num = 0; // setez valoarea lui in sender_handler() cand trimit pachetul
+        new_node->sent = false;
+        new_node->acked = false;
         new_node->next = NULL;
 
         // leg nodul anterior de el
@@ -125,7 +132,7 @@ int send_data(int conn_id, char *buffer, int len)
     list* current_list = current_connection->window;
     
     // verific intai daca mai am loc sa pun in lista
-    if (current_list->size >= current_connection->max_window_seq) {   // ------------------------------------------!!!!! atentie max_window_seq nu reprezinta ceea ce credeam, trebuie sa compar cu alt camp
+    if (current_list->size >= SEND_BUFFER_MAX) {
         pthread_mutex_unlock(&cons[conn_id]->con_lock);
         return -1;
     }
@@ -165,43 +172,39 @@ void *sender_handler(void *arg)
         list* window = current_connection->window;
 
         if (res == -1) {
-            // timeout => retrimit tot ce era in fereastra
-            int current_size = 0;
+            // timeout => retrimit doar segmentele trimise dar neconfirmate
             struct list_node* head = window->head;
+            while (head != NULL) {
+                if (head->sent && !head->acked) {
+                    // eu trebuie sa merge-uiesc head-ul si header-ul de poli_tcp_data_hdr
+                    char buffer[sizeof(struct poli_tcp_data_hdr) + MAX_DATA_SIZE];
 
-            while (current_size < current_connection->max_window_seq && head != NULL) {
-                // eu trebuie sa merge-uiesc head-ul si header-ul de poli_tcp_data_hdr
-                char buffer[sizeof(struct poli_tcp_data_hdr) + MAX_DATA_SIZE];
+                    // setez in buffer partea de header
+                    struct poli_tcp_data_hdr data_header;
+                    memset(&data_header, 0, sizeof(struct poli_tcp_data_hdr));
+                    data_header.protocol_id = POLI_PROTOCOL_ID;
+                    data_header.conn_id = conn_id;
+                    data_header.type = DATA_TYPE;
+                    data_header.seq_num = head->seq_num;
+                    data_header.len = head->payload_len;
 
-                // setez in buffer partea de header
-                struct poli_tcp_data_hdr data_header;
-                memset(&data_header, 0, sizeof(struct poli_tcp_data_hdr));
-                data_header.protocol_id = POLI_PROTOCOL_ID;
-                data_header.conn_id = conn_id;
-                data_header.type = DATA_TYPE;
-                data_header.seq_num = head->seq_num;
-                data_header.len = head->payload_len;
+                    memcpy(buffer, &data_header, sizeof(struct poli_tcp_data_hdr));
 
-                memcpy(buffer, &data_header, sizeof(struct poli_tcp_data_hdr));
+                    // setez in buffer (dupa header) partea de payload
+                    memcpy(buffer + sizeof(struct poli_tcp_data_hdr), head->payload, head->payload_len);
 
-                // setez in buffer (dupa header) partea de payload
-                memcpy(buffer + sizeof(struct poli_tcp_data_hdr), head->payload, head->payload_len);
+                    // am construit segmentul complet (header + payload)
+                    // trimit segmentul
 
-                // am construit segmentul complet (header + payload)
-                // trimit segmentul
-
-                int buffer_len = sizeof(struct poli_tcp_data_hdr) + head->payload_len;
-                int rc = sendto(current_connection->sockfd, buffer, buffer_len, 0, (struct sockaddr*)&current_connection->servaddr, sizeof(struct sockaddr_in));
-                if (rc < 0) {
-                    perror("sendto failed");
-                    exit(EXIT_FAILURE);
+                    int buffer_len = sizeof(struct poli_tcp_data_hdr) + head->payload_len;
+                    int rc = sendto(current_connection->sockfd, buffer, buffer_len, 0, (struct sockaddr*)&current_connection->servaddr, sizeof(struct sockaddr_in));
+                    if (rc < 0) {
+                        perror("sendto failed");
+                        exit(EXIT_FAILURE);
+                    }
                 }
-
-                current_size++;
                 head = head->next;
             } 
-
-            window->next_to_send = head;
         } else {
             // header-ul segmentului primit
             struct poli_tcp_ctrl_hdr *ack_received = (struct poli_tcp_ctrl_hdr*)buf;
@@ -212,13 +215,19 @@ void *sender_handler(void *arg)
             }
 
             int ack_num = ack_received->ack_num;
-            int recv_window = ack_received->recv_window;
+            current_connection->recv_window = ack_received->recv_window;
 
-            // implementarea de aici ar corespunde pentru [update_left_window] --------------------------------------------------------
-            // cand am primit ack trebuie sa elimin din lista (window) toate segmentele care au seq_num < ack
+            // marchez nodurile confirmate
             struct list_node* head = window->head;
-            int deleted_nodes = 0;
             while (head != NULL && head->seq_num < ack_num) {
+                head->acked = true;
+                head = head->next;
+            }
+
+            // sterg din capul listei doar nodurile consecutive cu acked == true
+            head = window->head;
+            int deleted_nodes = 0;
+            while (head != NULL && head->acked) {
                 struct list_node *prev = head;
                 head = head->next;
                 free(prev);
@@ -227,15 +236,24 @@ void *sender_handler(void *arg)
             // actualizez window dupa stergere
             window->head = head;
             window->size -= deleted_nodes;
+            if (head != NULL) {
+                current_connection->base = head->seq_num;
+            } else {
+                current_connection->base = current_connection->next_seq;
+            }
+
+            // verific ca next to send sa pointeze corect (in urma stergerii nodurilor)
+            if (window->next_to_send == NULL && window->head != NULL) {
+                window->next_to_send = window->head;
+            }
 
 
-            // implementarea de aici ar corespunde pentru [send_new_segments] --------------------------------------------------------
             // trimit pachetele (max_window_size sau cate exista in lista, daca sunt mai putine)
             int current_size = get_in_flight_nodes(window, window->head, window->next_to_send);
             head = window->next_to_send;
 
             // trebuie sa trimit minimul dintre (recv_window si max_window)
-            int min_rwnd_cwnd = std::min(recv_window, current_connection->max_window_seq);
+            int min_rwnd_cwnd = std::min(current_connection->recv_window, current_connection->max_window_seq);
             while (current_size < min_rwnd_cwnd && head != NULL) {
                 // eu trebuie sa merge-uiesc head-ul si header-ul de poli_tcp_data_hdr
                 char buffer[sizeof(struct poli_tcp_data_hdr) + MAX_DATA_SIZE];
@@ -249,6 +267,7 @@ void *sender_handler(void *arg)
 
                 head->seq_num = current_connection->next_seq;
                 current_connection->next_seq++;
+                head->sent = true;
                 data_header.seq_num = head->seq_num;
 
                 data_header.len = head->payload_len;
@@ -269,7 +288,6 @@ void *sender_handler(void *arg)
                 }
                 current_size++;
                 head = head->next;
-                window->size++;
             } 
             window->next_to_send = head;
         }
@@ -286,12 +304,17 @@ int setup_connection(uint32_t ip, uint16_t port)
     // creez conexiunea ------------------------------------------------------------------------------
     struct connection *con = (struct connection *)malloc(sizeof(struct connection));
 
-    // setez parametrii din "struct connection"
+    // parametrii din "struct connection"
     con->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-
     con->conn_id = conn_cnt;
     conn_cnt++;
+    con->max_window_seq = bdp;
+    con->next_seq = 0;
+    con->base = 0;
+    con->recv_window = 0;
+    
 
+    // adresa serverului
     struct sockaddr_in servaddr;
     memset(&servaddr, 0, sizeof(struct sockaddr_in));
     servaddr.sin_family = AF_INET;
@@ -300,8 +323,6 @@ int setup_connection(uint32_t ip, uint16_t port)
     con->servaddr = servaddr;
     con->window = create_window();  // da free la window cand inchizi conexiunea !!!!!
 
-    // cate segmente pot avea maxim
-    con->max_window_seq = bdp / MAX_SEGMENT_SIZE;
 
     // This can be used to set a timer on a socket -----------------------------------------------------
     struct timeval tv;
@@ -310,10 +331,6 @@ int setup_connection(uint32_t ip, uint16_t port)
     if (setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv)) < 0) {
         perror("Error");
     }
-
-    /* We will send the SYN on 8031. Then we will receive a SYN-ACK with the connection
-     * port. We can use con->sockfd for both cases, but we will need to update server_addr
-     * with the port received via SYN-ACK */
 
     // creez structurile pentru a implementa "three way handshake" ------------------------------------------
     // 1. Trimit SYN la server
@@ -325,6 +342,7 @@ int setup_connection(uint32_t ip, uint16_t port)
     syn.ack_num = 0;
     syn.seq_num = 0;
 
+    int rc;
     rc = sendto(con->sockfd, &syn, sizeof(struct poli_tcp_ctrl_hdr), 0, (struct sockaddr *)&con->servaddr, sizeof(struct sockaddr_in));
     if (rc < 0) {
         perror("sendto failed");
@@ -376,6 +394,7 @@ int setup_connection(uint32_t ip, uint16_t port)
             // modific portul conexiunii cu ceea ce primesc de la server
             uint16_t new_port = *(uint16_t*)(buffer + sizeof(struct poli_tcp_ctrl_hdr));
             con->servaddr.sin_port = new_port;
+            con->recv_window = syn_ack.recv_window;
             rc = sendto(con->sockfd, &ack, sizeof(struct poli_tcp_ctrl_hdr), 0, (struct sockaddr*)&con->servaddr, sizeof(struct sockaddr_in));
             if (rc < 0) {
                 perror("sendto failed");
@@ -417,14 +436,26 @@ void init_sender(int speed, int delay)
     pthread_t thread1;
     int ret;
 
-    // [speed] = Mb/s => fac conversie
-    speed = (speed * 1000000) / 8;
+    // [speed in biti] = Mb/s => fac conversie
+    double speed_bits = speed * 1000000.0;
 
-    // [delay] = ms => fac conversie
-    delay = delay / 1000;
+    // [rtt] = 2 * [delay] => ms => fac conversie
+    double rtt = (delay * 2.0) / 1000.0;
 
-    // calculez bandwidth => rez imi da in bytes
-    bdp = speed * delay;
+    // calculez bandwidth (in biti)
+    double bdp_bits = speed_bits * rtt;
+
+    // cate segmente pot fi inflight
+    int eth_hdr_len = 14;
+    int ip_hdr_len = 20;
+    int udp_hdr_len = 8;
+    int frame_size = eth_hdr_len + ip_hdr_len + udp_hdr_len + MAX_SEGMENT_SIZE;
+
+    int window_size = (int) (bdp_bits / (8.0 * frame_size));
+    if (window_size < 1)
+        window_size = 1;
+    
+    bdp = window_size;
 
     /* Create a thread that will*/
     ret = pthread_create(&thread1, NULL, sender_handler, NULL);
