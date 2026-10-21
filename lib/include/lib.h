@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <cstdint>
@@ -28,6 +27,7 @@ struct connection {
     int next_seq; // urmatorul seq_num de atribuit
     int base; // primul seq_num neconfirmat
     int recv_window; // ultimul recv_window primit de la server
+    int dup_acks; // ACK-uri duplicate consecutive (pentru fast retransmit)
     struct list* window;
 
     
